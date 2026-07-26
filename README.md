@@ -206,6 +206,190 @@ test-ai-rag-workflow/
 5. 展示工作流自动化配置
 ```
 
+## 三层架构使用示例
+
+### Layer 1: knowledge_base（RAG知识库）
+
+**作用**：AI回答问题时的"记忆"，只会调取这里的内部资料，不会网上乱编
+
+**配置步骤**：
+```
+1. 打开AnythingLLM → 进入工作区
+2. 点击"上传文件"
+3. 选择 knowledge_base/ 目录下所有文件
+4. 等待文件解析完成（约1-2分钟）
+5. 验证：在聊天框输入"ERC20转账测试用例有哪些？"，AI应能准确回答
+```
+
+**文件说明**：
+| 文件 | 用途 | AI如何使用 |
+|------|------|-----------|
+| `golden_cases/` | 标准测试用例 | AI参考格式生成新用例 |
+| `bad_cases/` | 故障案例库 | AI匹配报错给出排查方案 |
+| `test_format_standards.md` | 测试规范 | AI保证输出格式统一 |
+
+**使用示例**：
+```
+用户提问："帮我生成ERC20授权测试用例"
+AI检索：自动查找 knowledge_base/golden_cases/erc20_test_cases.md 中授权相关用例
+AI输出：按照知识库中的标准格式，生成完整的授权测试用例文档
+```
+
+---
+
+### Layer 2: skills（业务执行Skill）
+
+**作用**：固定模板提示词，告诉AI"遇到什么情况该怎么做"
+
+**当前配置方式**：两份Skill规则已写入全局系统Prompt，不管是普通聊天还是跑Workflow，AI都会遵循这份行为规范。**注：当前缺少"单独唤起单个Skill"的快捷调用入口（即`@用例生成Skill`这种方式暂不可用）**。
+
+**配置步骤**：
+```
+1. 打开AnythingLLM → 进入工作区设置
+2. 找到"系统Prompt"配置项
+3. 将 skills/case_generation_skill.txt 和 skills/log_analysis_skill.txt 的内容合并写入
+4. 保存设置
+5. 验证：直接在聊天框输入"帮我生成测试用例"或"分析报错日志"，AI会自动遵循Skill规则
+```
+
+**Skill说明**：
+| Skill名称 | 触发方式 | 功能 |
+|-----------|----------|------|
+| 用例生成Skill | 自动匹配（输入含"生成用例"、"测试用例"等关键词） | 根据接口文档生成测试用例 |
+| 日志分析Skill | 自动匹配（输入含"报错"、"日志"、"排查"等关键词） | 分析报错日志给出根因 |
+
+**使用示例1 - 用例生成**：
+```
+用户输入：
+请根据以下ABI生成测试用例：
+[{"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"}],
+"name":"transfer","type":"function"}]
+
+AI输出（自动遵循用例生成Skill规则）：
+## case_001 正常转账测试
+- 前置条件：部署合约，mint代币给用户
+- 测试步骤：调用transfer(to, value)
+- 预期结果：余额变更，Transfer事件触发
+- 代码参考：def test_transfer(erc20_token, deployer, user1): ...
+```
+
+**使用示例2 - 日志分析**：
+```
+用户输入：
+分析以下测试报错：
+AssertionError: balance_deployer_after == balance_deployer_before - expected_transfer
+Expected: 800 ether
+Actual: 1000 ether
+
+AI输出（自动遵循日志分析Skill规则）：
+## 问题分析：转账未生效
+- 根因：transfer调用失败但未捕获异常
+- 解决方案：使用with reverts()上下文管理器
+- 代码参考：with reverts(): erc20_api.transfer(user1, amount, deployer)
+```
+
+---
+
+### Layer 3: workflow（流程串联）
+
+**作用**：按顺序把多个Skill串起来自动执行，不用手动一次次发消息
+
+**配置步骤**：
+```
+1. 打开AnythingLLM → 点击左侧"工作流"图标
+2. 点击"新建工作流"
+3. 命名："Web3_Contract_Test_Automation_Workflow"
+4. 添加步骤：
+   Step 1: 接收用户输入（合约ABI）
+   Step 2: 根据系统Prompt中的用例生成规则，生成标准化测试用例
+   Step 3: 根据系统Prompt中的日志分析规则，分析潜在风险
+5. 保存工作流
+6. 验证：在聊天框输入"@Web3_Contract_Test_Automation_Workflow"
+```
+
+**注**：Skill规则已写入全局系统Prompt，Workflow执行时AI会自动遵循规则，无需单独调用`@用例生成Skill`或`@日志分析Skill`。
+
+**工作流链路**：
+```
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│  用户输入ABI     │ → │ 用例生成Skill    │ → │ 日志分析Skill    │
+│  接口文档        │    │ 生成标准化用例   │    │ 分析潜在风险     │
+└──────────────────┘    └──────────────────┘    └──────────────────┘
+                                                        │
+                                                        ▼
+                                              ┌──────────────────┐
+                                              │ 输出完整测试方案 │
+                                              │ + 风险提示       │
+                                              └──────────────────┘
+```
+
+**使用示例**：
+```
+用户输入：
+@Web3_Contract_Test_Automation_Workflow
+请帮我处理这个合约的测试：
+[{"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],
+"name":"approve","type":"function"},
+{"inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},
+{"name":"amount","type":"uint256"}],"name":"transferFrom","type":"function"}]
+
+AI自动执行：
+1. → 解析ABI，识别approve和transferFrom两个函数
+2. → 调用用例生成Skill，生成授权+代付转账测试用例
+3. → 调用日志分析Skill，分析重入攻击、授权超限等风险
+4. → 输出完整测试方案：用例文档 + pytest代码 + 安全测试建议
+
+最终输出：
+✅ Web3_Contract_Test_Automation_Workflow completed successfully
+
+## 测试方案汇总
+
+### 生成的测试用例
+1. case_001: approve基础授权测试
+2. case_002: approve授权覆盖测试
+3. case_003: transferFrom代付转账测试
+4. case_004: transferFrom授权不足测试
+...
+
+### 潜在风险提示
+1. ⚠️ 无限授权风险：建议添加授权额度校验
+2. ⚠️ 重入攻击风险：建议添加防重入锁
+3. ⚠️ 零地址风险：建议添加零地址校验
+...
+```
+
+---
+
+### 三层协同工作原理
+
+```
+用户提问
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│              Workflow (流程调度)                     │
+│   "用户要生成测试用例，先调哪个Skill？"               │
+└──────────────────┬──────────────────────────────────┘
+                   │ 调用
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│              Skill (业务执行)                        │
+│   "收到，我来生成用例，但需要查知识库"                │
+└──────────────────┬──────────────────────────────────┘
+                   │ 检索
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│              knowledge_base (知识检索)               │
+│   "找到ERC20测试用例模板，返回给Skill"               │
+└──────────────────┬──────────────────────────────────┘
+                   │ 返回
+                   ▼
+              AI生成答案
+                   │
+                   ▼
+              返回给用户
+```
+
 ## 后续规划
 
 ### 短期目标 ✅ 已完成
